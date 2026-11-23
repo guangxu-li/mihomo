@@ -747,6 +747,9 @@ func shouldStopRetry(err error) bool {
 	if errors.Is(err, loopback.ErrReject) {
 		return true
 	}
+	if errors.Is(err, C.ErrNoWireGuardEndpoint) {
+		return true
+	}
 	return false
 }
 

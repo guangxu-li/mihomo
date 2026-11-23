@@ -1287,7 +1287,59 @@ proxies: # socks5
     # initial-connection-receive-window： 20971520
     # max-connection-receive-window： 20971520
 
+  # WireGuard peer access: one tunnel that works in both directions.
+  # allow-peer-access accepts connections that peers open through the tunnel.
+  # listen-port also listens for peers on that UDP port and implies allow-peer-access.
+  #   - Traffic to the proxy's own ip / ipv6 reaches local services on 127.0.0.1 / ::1.
+  #     DNS queries to it on port 53 are answered by mihomo's DNS when it is enabled.
+  #   - Traffic to any other address goes through the rules, so a peer can use this node as an exit.
+  # Every configured peer may reach any destination that the rules allow. Restrict peers with
+  # SRC-IP-CIDR, IN-NAME (the proxy name) and IN-TYPE,WIREGUARD rules, and give each peer
+  # narrow allowed-ips. As for every inbound, the rules decide once for each UDP source port:
+  # a rule on the destination does not stop later datagrams from that port to another address.
+  # A reload that leaves the proxy options unchanged keeps the session and its handshakes.
+  # The proxy starts when the config is applied. If a server name does not resolve then,
+  # it is tried again. With listen-port the other peers work meanwhile.
+  # A proxy provider must not use these options. A provider that carries such a proxy is
+  # rejected: an update keeps the earlier proxies. At a first load an http provider that
+  # rejects its cache file fetches again. A file or http provider with no source that loads
+  # is left with the proxies of its payload option, or with none. A group that has no
+  # proxies then goes to DIRECT, unless empty-fallback is set. In an inline provider, or in
+  # the payload of another one, such a proxy fails the whole config.
+  #
+  # - name: wg-server
+  #   type: wireguard
+  #   private-key: <server private key>
+  #   ip: 10.8.0.1
+  #   ipv6: fd00:8::1
+  #   listen-port: 51900 # Implies allow-peer-access. All peers share this port.
+  #   peers:
+  #     - public-key: <phone public key>
+  #       allowed-ips: [10.8.0.2/32, "fd00:8::2/128"] # Endpoint learned on handshake
+  #     - public-key: <laptop public key>
+  #       allowed-ips: [10.8.0.3/32]
+  #       server: 192.0.2.10
+  #       port: 51900
+  #   # dialer-proxy is ignored for the listening socket.
+  #   # amnezia-wg-option and reserved are not supported with listen-port.
+  #   # interface-name selects the interface for each datagram on Linux and macOS only.
+  #
+  # - name: wg-client
+  #   type: wireguard
+  #   private-key: <phone private key>
+  #   ip: 10.8.0.2
+  #   ipv6: fd00:8::2
+  #   server: 192.0.2.1
+  #   port: 51900
+  #   public-key: <server public key>
+  #   allowed-ips: [10.8.0.0/24, "fd00:8::/64"]
+  #   udp: true
+  #   allow-peer-access: true # alias: accept-incoming
+  #   # A peer with an endpoint uses persistent-keepalive: 25 unless it is set.
+
   # wireguard
+  # A connection that the rules send through a wireguard proxy to the proxy's own ip / ipv6
+  # is delivered to 127.0.0.1 / ::1 on this device, with or without allow-peer-access.
   - name: "wg"
     type: wireguard
     server: 162.159.192.1

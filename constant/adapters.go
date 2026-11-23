@@ -66,6 +66,7 @@ const (
 )
 
 var ErrNotSupport = errors.New("no support")
+var ErrNoWireGuardEndpoint = errors.New("WireGuard peer has no learned endpoint")
 
 type Connection interface {
 	Chains() Chain
