@@ -580,7 +580,7 @@ func (w *WireGuard) init0(ctx context.Context) (err error) {
 	}()
 
 	if debug.Enabled {
-		log.SingLogger.Trace(fmt.Sprintf("[WG](%s) created wireguard ipc conf: \n %s", w.option.Name, ipcConf))
+		log.SingLogger.Trace(fmt.Sprintf("[WG](%s) created wireguard ipc conf: \n %s", w.option.Name, redactWireGuardIpcConf(ipcConf)))
 	}
 	err = wgDevice.IpcSet(ipcConf)
 	if err != nil {
