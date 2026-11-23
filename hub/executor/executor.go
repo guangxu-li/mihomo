@@ -285,7 +285,7 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 	resolver.DefaultResolver = r
 	resolver.DefaultHostMapper = m
 	resolver.DefaultService.Store(s)
-	resolver.UseSystemHosts = c.UseSystemHosts
+	resolver.UseSystemHosts.Store(c.UseSystemHosts)
 
 	if r.ProxyResolver.Invalid() {
 		resolver.ProxyServerHostResolver = r.ProxyResolver
@@ -305,7 +305,7 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 }
 
 func updateHosts(tree *trie.DomainTrie[resolver.HostValue]) {
-	resolver.DefaultHosts = resolver.NewHosts(tree)
+	resolver.DefaultHosts.Store(tree)
 }
 
 func updateProxies(proxies map[string]C.Proxy, providers map[string]P.ProxyProvider) {
