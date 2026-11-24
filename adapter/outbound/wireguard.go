@@ -45,6 +45,8 @@ const (
 type wireguardGoDevice interface {
 	Close()
 	IpcSet(uapiConf string) error
+	IpcGet() (string, error)
+	Up() error
 }
 
 type WireGuard struct {
@@ -63,6 +65,8 @@ type WireGuard struct {
 	option        WireGuardOption
 	connectAddr   M.Socksaddr
 	localPrefixes []netip.Prefix
+	peerRoutes    []wgPeerRoute // see wireguard_peer.go
+	egress        *wgEgress     // set for a device that SyncWireGuard runs
 
 	serverAddrMap   map[M.Socksaddr]netip.AddrPort
 	serverAddrTime  atomic.TypedValue[time.Time]
@@ -80,6 +84,9 @@ type WireGuardOption struct {
 	MTU                 int    `proxy:"mtu,omitempty"`
 	UDP                 bool   `proxy:"udp,omitempty"`
 	PersistentKeepalive int    `proxy:"persistent-keepalive,omitempty"`
+	AllowPeerAccess     bool   `proxy:"allow-peer-access,omitempty"`
+	AcceptIncoming      bool   `proxy:"accept-incoming,omitempty"` // earlier name of allow-peer-access
+	ListenPort          int    `proxy:"listen-port,omitempty"`
 
 	IPStack IPStackOption `proxy:"ip-stack,omitempty"`
 
@@ -94,6 +101,7 @@ type WireGuardOption struct {
 }
 
 type WireGuardPeerOption struct {
+	Keepalive    any      `proxy:"persistent-keepalive,omitempty"` // with peer access only, see preparePeerAccess
 	Server       string   `proxy:"server,omitempty"`
 	Port         int      `proxy:"port,omitempty"`
 	PublicKey    string   `proxy:"public-key,omitempty"`
@@ -146,6 +154,8 @@ type AmneziaWGOption struct {
 type IPStackOption struct {
 	Mode                 string `proxy:"mode,omitempty"`
 	CongestionController string `proxy:"congestion-controller,omitempty"`
+
+	forward bool `proxy:"-"` // accept packets for other addresses: set for peer access
 }
 
 func (o *IPStackOption) normalize() {
@@ -204,6 +214,7 @@ func newIPStack(option IPStackOption, localAddresses []netip.Prefix, mtu uint32)
 	case ipStackMips:
 		return mipstack.New(mipstack.Config{
 			LocalAddresses: localAddresses,
+			Promiscuous:    option.forward,
 			MTU:            mtu,
 			TCP: mipstack.TCPSocketDefaults{
 				CongestionControl: option.CongestionController,
@@ -352,6 +363,9 @@ func (option WireGuardOption) Prefixes() ([]netip.Prefix, error) {
 }
 
 func NewWireGuard(option WireGuardOption) (*WireGuard, error) {
+	if err := option.preparePeerAccess(); err != nil {
+		return nil, err
+	}
 	outbound := &WireGuard{
 		Base: NewBase(BaseOption{
 			Name:         option.Name,
@@ -499,6 +513,9 @@ func (w *WireGuard) resolve(ctx context.Context, address M.Socksaddr) (netip.Add
 	if address.Addr.IsValid() {
 		return address.AddrPort(), nil
 	}
+	if w.option.ListenPort != 0 { // the endpoint may be absent or not resolvable yet
+		return w.listenEndpoint(ctx, address), nil
+	}
 	udpAddr, err := resolveUDPAddr(ctx, "udp", address.String(), w.prefer)
 	if err != nil {
 		return netip.AddrPort{}, err
@@ -548,6 +565,12 @@ func (w *WireGuard) init0(ctx context.Context) (err error) {
 		w.initErr = E.Cause(err, "create WireGuard stack")
 		return w.initErr
 	}
+	if w.option.AllowPeerAccess {
+		if err = w.acceptPeers(stack); err != nil {
+			_ = stack.Close()
+			return err
+		}
+	}
 	tunDevice, err := newWireguardDevice(stack)
 	if err != nil {
 		_ = stack.Close()
@@ -571,7 +594,7 @@ func (w *WireGuard) init0(ctx context.Context) (err error) {
 			wgDevice = amnezia.NewDevice(tunDevice, w.bind, logger, w.option.Workers)
 		}
 	} else {
-		wgDevice = device.NewDevice(tunDevice, w.bind, logger, w.option.Workers)
+		wgDevice = device.NewDevice(tunDevice, w.deviceBind(ctx), logger, w.option.Workers)
 	}
 	defer func() {
 		if err != nil {
@@ -580,7 +603,7 @@ func (w *WireGuard) init0(ctx context.Context) (err error) {
 	}()
 
 	if debug.Enabled {
-		log.SingLogger.Trace(fmt.Sprintf("[WG](%s) created wireguard ipc conf: \n %s", w.option.Name, ipcConf))
+		log.SingLogger.Trace(fmt.Sprintf("[WG](%s) created wireguard ipc conf: \n %s", w.option.Name, redactWireGuardIpcConf(ipcConf)))
 	}
 	err = wgDevice.IpcSet(ipcConf)
 	if err != nil {
@@ -589,6 +612,24 @@ func (w *WireGuard) init0(ctx context.Context) (err error) {
 	}
 	w.serverAddrTime.Store(time.Now())
 
+	if w.option.AllowPeerAccess {
+		// The event that Start sends brings the device up later and hides a failed bind.
+		// A peer may connect as soon as this returns, so bring it up now. A device that
+		// dials is not waited for after ctx: a dialer-proxy may hold its first datagram,
+		// as it does for a proxy without peer access.
+		up := make(chan error, 1)
+		go func() { up <- wgDevice.Up() }()
+		select {
+		case err = <-up:
+		case <-ctx.Done():
+		}
+		if err == nil && w.option.ListenPort != 0 {
+			err = ctx.Err()
+		}
+		if err != nil {
+			return err
+		}
+	}
 	err = tunDevice.Start()
 	if err != nil {
 		w.initErr = err
@@ -601,7 +642,7 @@ func (w *WireGuard) init0(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	w.device, w.tunDevice = wgDevice, tunDevice
+	w.device, w.tunDevice = wgDevice, wgLocalDevice{tunDevice, w}
 	w.initOk.Store(true)
 	return nil
 }
@@ -629,6 +670,9 @@ func (w *WireGuard) genIpcConf(ctx context.Context, updateOnly bool) (string, er
 	ipcConf := ""
 	if !updateOnly {
 		ipcConf += "private_key=" + w.option.PrivateKey + "\n"
+		if w.option.ListenPort != 0 {
+			ipcConf += "listen_port=" + strconv.Itoa(w.option.ListenPort) + "\n"
+		}
 		if w.option.AmneziaWGOption != nil {
 			if w.option.AmneziaWGOption.JC != 0 {
 				ipcConf += "jc=" + strconv.Itoa(w.option.AmneziaWGOption.JC) + "\n"
@@ -739,7 +783,7 @@ func (w *WireGuard) genIpcConf(ctx context.Context, updateOnly bool) (string, er
 			if updateOnly {
 				ipcConf += "update_only=true\n"
 			}
-			ipcConf += "endpoint=" + destination.String() + "\n"
+			ipcConf += w.endpointConf(peer, destination, updateOnly)
 			if len(peer.Reserved) > 0 {
 				var reserved [3]uint8
 				copy(reserved[:], peer.Reserved)
@@ -754,8 +798,8 @@ func (w *WireGuard) genIpcConf(ctx context.Context, updateOnly bool) (string, er
 			for _, allowedIP := range peer.AllowedIPs {
 				ipcConf += "allowed_ip=" + allowedIP + "\n"
 			}
-			if w.option.PersistentKeepalive != 0 {
-				ipcConf += fmt.Sprintf("persistent_keepalive_interval=%d\n", w.option.PersistentKeepalive)
+			if keepalive := w.keepalive(peer, destination); keepalive != 0 {
+				ipcConf += fmt.Sprintf("persistent_keepalive_interval=%d\n", keepalive)
 			}
 		}
 	} else {
@@ -819,6 +863,9 @@ func (w *WireGuard) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.
 	if err = w.init(ctx); err != nil {
 		return nil, err
 	}
+	if c, err := w.dialOwnAddress(ctx, metadata); c != nil || err != nil {
+		return c, err
+	}
 	if !metadata.Resolved() || w.resolver != nil {
 		r := resolver.DefaultResolver
 		if w.resolver != nil {
@@ -847,6 +894,9 @@ func (w *WireGuard) ListenPacketContext(ctx context.Context, metadata *C.Metadat
 	}
 	if err = w.ResolveUDP(ctx, metadata); err != nil {
 		return nil, err
+	}
+	if pc, err := w.listenOwnAddress(metadata); pc != nil || err != nil {
+		return pc, err
 	}
 	// The ipStack contract guarantees that a generic UDP wildcard supports both address families.
 	pc, err = w.tunDevice.ListenUDP(ctx, "udp", netip.AddrPort{})

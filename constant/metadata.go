@@ -44,6 +44,7 @@ const (
 	TRUSTTUNNEL
 	SHADOWQUIC
 	INNER
+	WIREGUARD
 )
 
 type AddrType byte
@@ -126,6 +127,8 @@ func (t Type) String() string {
 		return "ShadowQuic"
 	case INNER:
 		return "Inner"
+	case WIREGUARD:
+		return "WireGuard"
 	default:
 		return "Unknown"
 	}
@@ -176,6 +179,8 @@ func ParseType(t string) (*Type, error) {
 		res = SHADOWQUIC
 	case "INNER":
 		res = INNER
+	case "WIREGUARD":
+		res = WIREGUARD
 	default:
 		return nil, fmt.Errorf("unknown type: %s", t)
 	}
@@ -212,6 +217,11 @@ type Metadata struct {
 	SpecialRules string     `json:"specialRules"`
 	RemoteDst    string     `json:"remoteDestination"`
 	DSCP         uint8      `json:"dscp"`
+
+	// InboundLocal is set by an inbound for a connection to its own address,
+	// given as an IP address. The rules see that address. Unless they reject
+	// the connection, this adapter delivers it on this device.
+	InboundLocal ProxyAdapter `json:"-"`
 
 	RawSrcAddr net.Addr `json:"-"`
 	RawDstAddr net.Addr `json:"-"`

@@ -8,6 +8,7 @@ import (
 	"strings"
 	_ "unsafe"
 
+	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/component/resolver/hosts"
 	"github.com/metacubex/mihomo/component/trie"
 	"github.com/metacubex/randv2"
@@ -15,28 +16,34 @@ import (
 
 var (
 	DisableSystemHosts, _ = strconv.ParseBool(os.Getenv("DISABLE_SYSTEM_HOSTS"))
-	UseSystemHosts        bool
+	UseSystemHosts        atomic.Bool
 )
 
 type Hosts struct {
-	*trie.DomainTrie[HostValue]
+	trie atomic.Pointer[trie.DomainTrie[HostValue]]
 }
 
-func NewHosts(hosts *trie.DomainTrie[HostValue]) Hosts {
-	return Hosts{
-		hosts,
-	}
+func NewHosts(hosts *trie.DomainTrie[HostValue]) *Hosts {
+	h := &Hosts{}
+	h.Store(hosts)
+	return h
+}
+
+// Store replaces the hosts. A Search that is in progress keeps the ones it started with.
+func (h *Hosts) Store(hosts *trie.DomainTrie[HostValue]) {
+	h.trie.Store(hosts)
 }
 
 // Return the search result and whether to match the parameter `isDomain`
 func (h *Hosts) Search(domain string, isDomain bool) (*HostValue, bool) {
-	if value := h.DomainTrie.Search(domain); value != nil {
+	table := h.trie.Load()
+	if value := table.Search(domain); value != nil {
 		hostValue := value.Data()
 		for {
 			if isDomain && hostValue.IsDomain {
 				return &hostValue, true
 			} else {
-				if node := h.DomainTrie.Search(hostValue.Domain); node != nil {
+				if node := table.Search(hostValue.Domain); node != nil {
 					hostValue = node.Data()
 				} else {
 					break
@@ -50,7 +57,7 @@ func (h *Hosts) Search(domain string, isDomain bool) (*HostValue, bool) {
 		return &hostValue, false
 	}
 
-	if !isDomain && !DisableSystemHosts && UseSystemHosts {
+	if !isDomain && !DisableSystemHosts && UseSystemHosts.Load() {
 		addr, _ := hosts.LookupStaticHost(domain)
 		if hostValue, err := NewHostValue(addr); err == nil {
 			return &hostValue, true

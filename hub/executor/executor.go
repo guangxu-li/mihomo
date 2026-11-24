@@ -13,6 +13,7 @@ import (
 
 	"github.com/metacubex/mihomo/adapter"
 	"github.com/metacubex/mihomo/adapter/inbound"
+	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/adapter/outboundgroup"
 	"github.com/metacubex/mihomo/component/auth"
 	"github.com/metacubex/mihomo/component/ca"
@@ -77,6 +78,8 @@ func ParseWithPath(path string) (*config.Config, error) {
 
 // ParseWithBytes config with buffer
 func ParseWithBytes(buf []byte) (*config.Config, error) {
+	mux.Lock() // a parse puts the general settings of its config in use until it ends
+	defer mux.Unlock()
 	return config.Parse(buf)
 }
 
@@ -84,6 +87,7 @@ func ParseWithBytes(buf []byte) (*config.Config, error) {
 func ApplyConfig(cfg *config.Config, force bool) {
 	mux.Lock()
 	defer mux.Unlock()
+	outbound.OpenWireGuard(refreshWireGuard) // first, so that a Shutdown from here on wins
 	log.SetLevel(cfg.General.LogLevel)
 
 	tunnel.OnSuspend()
@@ -117,6 +121,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	loadProvider(cfg.RuleProviders)
 	runtime.GC()
 	tunnel.OnRunning()
+	syncWireGuard(true)
 	updateUpdater(cfg)
 
 	resolver.ResetConnection()
@@ -239,7 +244,7 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 	if !c.Enable {
 		resolver.DefaultResolver = nil
 		resolver.DefaultHostMapper = nil
-		resolver.DefaultService = nil
+		resolver.DefaultService.Store(nil)
 		resolver.ProxyServerHostResolver = nil
 		resolver.DirectHostResolver = nil
 		dns.ReCreateServer("", nil, nil)
@@ -284,8 +289,8 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 
 	resolver.DefaultResolver = r
 	resolver.DefaultHostMapper = m
-	resolver.DefaultService = s
-	resolver.UseSystemHosts = c.UseSystemHosts
+	resolver.DefaultService.Store(s)
+	resolver.UseSystemHosts.Store(c.UseSystemHosts)
 
 	if r.ProxyResolver.Invalid() {
 		resolver.ProxyServerHostResolver = r.ProxyResolver
@@ -305,7 +310,7 @@ func updateDNS(c *config.DNS, generalIPv6 bool) {
 }
 
 func updateHosts(tree *trie.DomainTrie[resolver.HostValue]) {
-	resolver.DefaultHosts = resolver.NewHosts(tree)
+	resolver.DefaultHosts.Store(tree)
 }
 
 func updateProxies(proxies map[string]C.Proxy, providers map[string]P.ProxyProvider) {
@@ -534,6 +539,7 @@ func Shutdown() {
 	listener.Cleanup()
 	tproxy.CleanupTProxyIPTables()
 	resolver.StoreFakePoolState()
+	outbound.CloseWireGuard()
 
 	log.Warnln("Mihomo shutting down")
 }

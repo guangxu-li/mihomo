@@ -294,6 +294,10 @@ func needLookupIP(metadata *C.Metadata) bool {
 }
 
 func preHandleMetadata(metadata *C.Metadata) error {
+	// The rules see the own address of the inbound, not a mapped host.
+	if metadata.InboundLocal != nil {
+		return nil
+	}
 	// preprocess enhanced-mode metadata
 	if needLookupIP(metadata) {
 		host, exist := resolver.FindHostByIP(metadata.DstIP)
@@ -321,7 +325,7 @@ func preHandleMetadata(metadata *C.Metadata) error {
 	return nil
 }
 
-func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err error) {
+func resolveMetadata(metadata *C.Metadata) (proxy C.ProxyAdapter, rule C.Rule, err error) {
 	if metadata.SpecialProxy != "" {
 		var exist bool
 		proxy, exist = proxies[metadata.SpecialProxy]
@@ -414,6 +418,9 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 	default:
 		proxy, rule, err = match(metadata, helper)
 	}
+	if err == nil {
+		proxy = inboundLocal(metadata, proxy)
+	}
 	return
 }
 
@@ -447,7 +454,7 @@ func handleUDPConn(packet C.PacketAdapter) {
 	key := packet.Key()
 	sender, loaded := natTable.GetOrCreate(key, func() C.PacketSender {
 		sender := newPacketSender()
-		if sniffingEnable && snifferDispatcher.Enable() {
+		if metadata.InboundLocal == nil && sniffingEnable && snifferDispatcher.Enable() {
 			return snifferDispatcher.UDPSniff(packet, sender)
 		}
 		return sender
@@ -531,7 +538,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 
 	conn := connCtx.Conn()
 	conn.ResetPeeked() // reset before sniffer
-	if sniffingEnable && snifferDispatcher.Enable() {
+	if metadata.InboundLocal == nil && sniffingEnable && snifferDispatcher.Enable() {
 		// Try to sniff a domain when `preHandleMetadata` failed, this is usually
 		// caused by a "Fake DNS record missing" error when enhanced-mode is fake-ip.
 		if snifferDispatcher.TCPSniff(conn, metadata) {
@@ -688,7 +695,7 @@ func match(metadata *C.Metadata, helper C.RuleMatchHelper) (C.Proxy, C.Rule, err
 					}
 				}
 
-				if metadata.NetWork == C.UDP && !adapter.SupportUDP() {
+				if metadata.InboundLocal == nil && metadata.NetWork == C.UDP && !adapter.SupportUDP() {
 					log.Debugln("%s UDP is not supported", adapter.Name())
 					continue
 				}
@@ -738,6 +745,9 @@ func shouldStopRetry(err error) bool {
 		return true
 	}
 	if errors.Is(err, loopback.ErrReject) {
+		return true
+	}
+	if errors.Is(err, C.ErrNoWireGuardEndpoint) {
 		return true
 	}
 	return false

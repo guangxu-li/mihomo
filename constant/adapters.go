@@ -66,6 +66,7 @@ const (
 )
 
 var ErrNotSupport = errors.New("no support")
+var ErrNoWireGuardEndpoint = errors.New("WireGuard peer has no learned endpoint")
 
 type Connection interface {
 	Chains() Chain
@@ -305,10 +306,15 @@ func (s *packetAdapter) Key() string {
 }
 
 func NewPacketAdapter(packet UDPPacket, metadata *Metadata) PacketAdapter {
+	key := packet.LocalAddr().String()
+	if local := metadata.InboundLocal; local != nil {
+		// The same destination may switch between local delivery and DNS hijack.
+		key += "/" + metadata.AddrPort().String() + "/" + local.Type().String() + "/" + local.Name()
+	}
 	return &packetAdapter{
 		packet,
 		metadata,
-		packet.LocalAddr().String(),
+		key,
 	}
 }
 
