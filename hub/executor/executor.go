@@ -77,6 +77,8 @@ func ParseWithPath(path string) (*config.Config, error) {
 
 // ParseWithBytes config with buffer
 func ParseWithBytes(buf []byte) (*config.Config, error) {
+	mux.Lock() // a parse puts the general settings of its config in use until it ends
+	defer mux.Unlock()
 	return config.Parse(buf)
 }
 
